@@ -315,12 +315,12 @@ tokenizer_hole :: proc(tokenizer: ^Tokenizer, ra: rune, start: i64) -> Token {
 }
 
 tokenizer_char :: proc(tokenizer: ^Tokenizer, _: rune, start: i64) -> Token {
-	rb := tokenizer_peek_rune(tokenizer)
+	rb := tokenizer_read_rune(tokenizer)
 	char: rune
 	if rb == '\\' {
 		char = tokenizer_escape(tokenizer)
 	} else {
-		char = tokenizer_read_rune(tokenizer)
+		char = rb
 	}
 	close := tokenizer_read_rune(tokenizer)
 	if close == '\'' {
@@ -332,6 +332,35 @@ tokenizer_char :: proc(tokenizer: ^Tokenizer, _: rune, start: i64) -> Token {
 }
 
 tokenizer_escape :: proc(tokenizer: ^Tokenizer) -> rune {
+	rb := tokenizer_read_rune(tokenizer)
+	switch rb {
+	case 't':
+		return '\t'
+	case 'r':
+		return '\r'
+	case 'n':
+		return '\n'
+	case '"':
+		return '\"'
+	case '\'':
+		return '\''
+	case '\\':
+		return '\\'
+	case 'x':
+		{
+			mx: [6]rune
+			tokenizer_peek_runes(tokenizer, &mx)
+			char: rune = 0
+			for r, i in mx {
+				if rune_is_hex_digit(r) {
+					tokenizer_read_rune(tokenizer)
+					char = char * 16 + rune(rune_to_digit(r))
+				}
+			}
+      return char
+		}
+
+	}
 	return 0
 }
 
@@ -358,7 +387,16 @@ tokenizer_operator :: proc(tokenizer: ^Tokenizer, _: rune, start: i64) -> Token 
 }
 
 rune_to_digit :: proc(r: rune) -> i64 {
-	return i64(r - '0')
+	switch r {
+	case '0' ..= '9':
+		return i64(r - '0')
+	case 'a' ..= 'f':
+		return 10 + i64(r - 'a')
+	case 'A' ..= 'F':
+		return 10 + i64(r - 'A')
+	}
+  assert(false)
+  return 0
 }
 
 rune_is_ident :: proc(r: rune) -> bool {
@@ -369,6 +407,15 @@ rune_is_white_space :: unicode.is_white_space
 rune_is_digit :: unicode.is_digit
 rune_is_lower :: unicode.is_lower
 rune_is_upper :: unicode.is_upper
+
+rune_is_hex_digit :: proc(r: rune) -> bool {
+	if rune_is_digit(r) do return true
+	switch r {
+	case 'a' ..= 'f', 'A' ..= 'F':
+		return true
+	}
+	return false
+}
 
 rune_is_symbol :: proc(r: rune) -> bool {
 	// All the ASCII cases are hardcoded
@@ -541,5 +588,20 @@ when ODIN_TEST {
 		expect_tokens(t, []Token{TokDot{}, TokTick{}, TokComma{}, TokBackslash{}}, ".`,\\")
 	}
 
+	@(test)
+	parse_char_simple :: proc(t: ^testing.T) {
+		expect_tokens(
+			t,
+			[]Token{
+				TokChar{char = 'a', raw = "'a'"},
+				TokChar{char = 'b', raw = "'b'"},
+				TokChar{char = 'c', raw = "'c'"},
+				TokChar{char = '#', raw = "'\\x23'"},
+				TokChar{char = '?', raw = "'\\x3f'"},
+				TokChar{char = '?', raw = "'\\x3F'"},
+			},
+			"'a' 'b' 'c' '\\x23' '\\x3f' '\\x3F'",
+		)
+	}
 }
 
