@@ -171,7 +171,7 @@ tokenizer_eat_while :: proc(tokenizer: ^Tokenizer, filter: proc(_: rune) -> bool
 
 tokenizer_peek_runes :: proc(tokenizer: ^Tokenizer, runes: ^[$B]rune) {
 	reader_copy := tokenizer.reader
-	for i in 0 ..= (B - 1) {
+	for i in 0 ..< B {
 		ri, ra_size, err := strings.reader_read_rune(&reader_copy)
 		if err != .None do ri = 0
 		runes[i] = ri
@@ -516,6 +516,7 @@ tokenizer_upper :: proc(
 	rr := tokenizer_peek_rune(tokenizer)
 	if rr == '.' {
 		append(qual, tokenizer_slice_as_string(tokenizer, start, end))
+		tokenizer_read_rune(tokenizer)
 		inner_start := tokenizer_start(tokenizer)
 		inner_ra := tokenizer_read_rune(tokenizer)
 		if inner_ra == '(' do return tokenizer_symbol(tokenizer, qual)
@@ -535,6 +536,7 @@ tokenizer_symbol :: proc(tokenizer: ^Tokenizer, qual: ^[dynamic]string) -> Token
 
 	ra := tokenizer_peek_rune(tokenizer)
 	if ra == ')' {
+		tokenizer_read_rune(tokenizer)
 		qual_copied := slice.clone(qual[:])
 		name := tokenizer_slice_as_string(tokenizer, start, end)
 		if is_reserved_symbol(name) do return nil
@@ -652,7 +654,7 @@ when ODIN_TEST {
 		errors := false
 		for expected, i in tokens {
 			value := tokenizer_next(&tokenizer)
-			if type_of(value) != type_of(expected) {
+			if fmt.aprint(value) != fmt.aprint(expected) {
 				errors = true
 				testing.errorf(
 					t,
@@ -782,6 +784,29 @@ when ODIN_TEST {
 				TokString("#$%"),
 			},
 			"\"abc\" \"a \\\"string\\\"\" \"\"\"aabbcc\"\"\" \"\"\"\"\"\" \"\\x23\\x24\\    \\\\x25\"",
+		)
+	}
+
+	@(test)
+	parse_string_idents :: proc(t: ^testing.T) {
+		expect_tokens(
+			t,
+			[]Token{
+				TokUpperName{[]string{"A", "B"}, "C"},
+				TokLowerName{[]string{"A", "B"}, "c"},
+				TokOperator{[]string{"A", "B"}, "*"},
+				TokSymbolName{[]string{"A", "B"}, "*"},
+			},
+			"A.B.C A.B.c A.B.* A.B.(*)",
+		)
+	}
+
+	@(test)
+	parse_string_idents_more_complex :: proc(t: ^testing.T) {
+		expect_tokens(
+			t,
+			[]Token{TokUpperName{[]string{"AaAaaA", "BbBbbbB"}, "CcCcccc"}},
+			"AaAaaA.BbBbbbB.CcCcccc",
 		)
 	}
 }
