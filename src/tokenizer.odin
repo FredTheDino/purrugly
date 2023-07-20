@@ -6,6 +6,7 @@ import "core:io"
 import "core:testing"
 import "core:unicode"
 import "core:unicode/utf8"
+import "core:slice"
 
 // src/Language/PureScript/CST/Lexer.hs
 // Is this enough? Do I need big-int?
@@ -15,10 +16,22 @@ TokRawString :: distinct string
 TokString :: distinct string
 TokChar :: distinct rune
 TokHole :: distinct string
-TokUpper :: distinct string
-TokLower :: distinct string
-TokSymbol :: distinct string
-TokOperator :: distinct string
+TokUpperName :: struct {
+	qual: []string,
+	name: string,
+}
+TokLowerName :: struct {
+	qual: []string,
+	name: string,
+}
+TokSymbolName :: struct {
+	qual: []string,
+	name: string,
+}
+TokOperator :: struct {
+	qual: []string,
+	name: string,
+}
 TokLineComment :: distinct string
 TokBlockComment :: distinct string
 TokEof :: struct {}
@@ -45,6 +58,7 @@ TokDot :: struct {}
 TokComma :: struct {}
 TokUnderscore :: struct {}
 TokBackslash :: struct {}
+TokSymbolArr :: struct {}
 
 // Operators are different in different contexts - I didn't really want to
 // encode this in the tokenizer, so I didn't. This means there is more logic
@@ -61,6 +75,7 @@ Token :: union {
 	TokRightArrow,
 	TokRightFatArrow,
 	TokDoubleColon,
+	TokSymbolArr,
 	TokForall,
 	TokEquals,
 	TokPipe,
@@ -75,9 +90,9 @@ Token :: union {
 	TokString,
 	TokChar,
 	TokHole,
-	TokUpper,
-	TokLower,
-	TokSymbol,
+	TokUpperName,
+	TokLowerName,
+	TokSymbolName,
 	TokOperator,
 	TokLayoutStart,
 	TokLayoutSep,
@@ -182,6 +197,9 @@ tokenizer_start :: proc(tokenizer: ^Tokenizer) -> i64 {
 }
 
 tokenizer_next :: proc(tokenizer: ^Tokenizer) -> Token {
+	qual: [dynamic]string
+	defer delete(qual)
+
 	start := tokenizer_start(tokenizer)
 	ra := tokenizer_read_rune(tokenizer)
 
@@ -203,7 +221,7 @@ tokenizer_next :: proc(tokenizer: ^Tokenizer) -> Token {
 	// ASCII
 	case '(':
 		// This is wrong
-		return TokLeftParen{}
+		return tokenizer_left_paren(tokenizer)
 	case ')':
 		return TokRightParen{}
 	case '{':
@@ -235,14 +253,14 @@ tokenizer_next :: proc(tokenizer: ^Tokenizer) -> Token {
 			tokenizer_peek_runes(tokenizer, &rs)
 			if rs[0] == '>' {
 				if rune_is_symbol(rs[1]) {
-					return tokenizer_operator(tokenizer, ra, start)
+					return tokenizer_operator(tokenizer, &qual, ra, start)
 				} else {
 					assert(tokenizer_read_rune(tokenizer) == rs[0])
 					return TokRightFatArrow{}
 				}
 			} else {
 				if rune_is_symbol(rs[0]) {
-					return tokenizer_operator(tokenizer, ra, start)
+					return tokenizer_operator(tokenizer, &qual, ra, start)
 				} else {
 					return TokEquals{}
 				}
@@ -255,13 +273,13 @@ tokenizer_next :: proc(tokenizer: ^Tokenizer) -> Token {
 			tokenizer_peek_runes(tokenizer, &rs)
 			if rs[0] == ':' {
 				if rune_is_symbol(rs[1]) {
-					return tokenizer_operator(tokenizer, ra, start)
+					return tokenizer_operator(tokenizer, &qual, ra, start)
 				} else {
 					assert(tokenizer_read_rune(tokenizer) == rs[0])
 					return TokDoubleColon{}
 				}
 			} else {
-				return tokenizer_operator(tokenizer, ra, start)
+				return tokenizer_operator(tokenizer, &qual, ra, start)
 			}
 			assert(false)
 		}
@@ -273,10 +291,9 @@ tokenizer_next :: proc(tokenizer: ^Tokenizer) -> Token {
 		return tokenizer_string(tokenizer, ra, start)
 	}
 	if rune_is_digit(ra) do return tokenizer_int_or_number(tokenizer, ra, start)
-	if rune_is_upper(ra) do return tokenizer_upper(tokenizer, ra, start)
-	// if rune_is_lower(ra) do return tokenizer_lower(tokenizer, ra, start)
-	// if rune_is_ident_start(ra) do return tokenizer_lower(tokenizer, ra, start)
-	if rune_is_symbol(ra) do return tokenizer_operator(tokenizer, ra, start)
+	if rune_is_upper(ra) do return tokenizer_upper(tokenizer, &qual, ra, start)
+	if rune_is_ident_start(ra) do return tokenizer_lower(tokenizer, &qual, ra, start)
+	if rune_is_symbol(ra) do return tokenizer_operator(tokenizer, &qual, ra, start)
 	// This is an error!
 	// assert(false)
 	return nil
@@ -297,12 +314,37 @@ or_operator :: proc(
 	if expect == 0 && !rune_is_symbol(rb) {
 		return token_if
 	}
-	return tokenizer_operator(tokenizer, ra, start)
+
+	qual: [dynamic]string
+	defer delete(qual)
+	return tokenizer_operator(tokenizer, &qual, ra, start)
+}
+
+tokenizer_left_paren :: proc(tokenizer: ^Tokenizer) -> Token {
+	reset := tokenizer^
+	start := tokenizer_start(tokenizer)
+	end := tokenizer_eat_while(tokenizer, rune_is_symbol)
+	if start == end {
+		return TokLeftParen{}
+	}
+	symbol := tokenizer_slice_as_string(tokenizer, start, end)
+	rb := tokenizer_read_rune(tokenizer)
+	if rb != ')' do return nil
+	if symbol == "->" || symbol == "→" {
+		return TokSymbolArr{}
+	}
+	if is_reserved_symbol(symbol) do return nil
+	tokenizer^ = reset
+	return TokLeftParen{}
 }
 
 tokenizer_hole :: proc(tokenizer: ^Tokenizer, ra: rune, start: i64) -> Token {
 	end := tokenizer_eat_while(tokenizer, rune_is_ident)
-	if end == start + 1 do return tokenizer_operator(tokenizer, ra, start)
+	if end == start + 1 {
+		qual: [dynamic]string
+		defer delete(qual)
+		return tokenizer_operator(tokenizer, &qual, ra, start)
+	}
 	return TokHole(tokenizer_slice_as_string(tokenizer, start, end))
 }
 
@@ -464,18 +506,87 @@ tokenizer_string :: proc(tokenizer: ^Tokenizer, _: rune, start: i64) -> Token {
 	return nil
 }
 
-tokenizer_upper :: proc(tokenizer: ^Tokenizer, ra: rune, start: i64) -> Token {
+tokenizer_upper :: proc(
+	tokenizer: ^Tokenizer,
+	qual: ^[dynamic]string,
+	_ra: rune,
+	start: i64,
+) -> Token {
+	end := tokenizer_eat_while(tokenizer, rune_is_ident)
+	rr := tokenizer_peek_rune(tokenizer)
+	if rr == '.' {
+		append(qual, tokenizer_slice_as_string(tokenizer, start, end))
+		inner_start := tokenizer_start(tokenizer)
+		inner_ra := tokenizer_read_rune(tokenizer)
+		if inner_ra == '(' do return tokenizer_symbol(tokenizer, qual)
+		if rune_is_upper(inner_ra) do return tokenizer_upper(tokenizer, qual, inner_ra, inner_start)
+		if rune_is_ident_start(inner_ra) do return tokenizer_lower(tokenizer, qual, inner_ra, inner_start)
+		if rune_is_symbol(inner_ra) do return tokenizer_operator(tokenizer, qual, inner_ra, inner_start)
+		return nil
+	} else {
+		qual_copied := slice.clone(qual[:])
+		return TokUpperName{qual_copied, tokenizer_slice_as_string(tokenizer, start, end)}
+	}
+}
+
+tokenizer_symbol :: proc(tokenizer: ^Tokenizer, qual: ^[dynamic]string) -> Token {
+	start := tokenizer_start(tokenizer)
+	end := tokenizer_eat_while(tokenizer, rune_is_symbol)
+
+	ra := tokenizer_peek_rune(tokenizer)
+	if ra == ')' {
+		qual_copied := slice.clone(qual[:])
+		name := tokenizer_slice_as_string(tokenizer, start, end)
+		if is_reserved_symbol(name) do return nil
+		else do return TokSymbolName{qual_copied, name}
+	}
 	return nil
 }
 
-tokenizer_lower :: proc(tokenizer: ^Tokenizer, ra: rune, start: i64) -> Token {
-	return nil
+tokenizer_lower :: proc(
+	tokenizer: ^Tokenizer,
+	qual: ^[dynamic]string,
+	ra: rune,
+	start: i64,
+) -> Token {
+	end := tokenizer_eat_while(tokenizer, rune_is_ident)
+	if ra == '_' {
+		if qual == nil {
+			return TokUnderscore{}
+		} else {
+			// Error - '_' is a magical symbol
+			return nil
+		}
+	}
+
+	name := tokenizer_slice_as_string(tokenizer, start, end)
+	if name == "forall" {
+		return TokForall{}
+	} else {
+		qual_copied := slice.clone(qual[:])
+		return TokLowerName{qual_copied, name}
+	}
 }
 
 // TODO: Take in Qualified
-tokenizer_operator :: proc(tokenizer: ^Tokenizer, _: rune, start: i64) -> Token {
+tokenizer_operator :: proc(
+	tokenizer: ^Tokenizer,
+	qual: ^[dynamic]string,
+	_: rune,
+	start: i64,
+) -> Token {
 	end := tokenizer_eat_while(tokenizer, rune_is_symbol)
-	return TokOperator(tokenizer_slice_as_string(tokenizer, start, end))
+	qual_copied := slice.clone(qual[:])
+	return TokOperator{qual_copied, tokenizer_slice_as_string(tokenizer, start, end)}
+}
+
+is_reserved_symbol :: proc(s: string) -> bool {
+	switch s {
+	case "::", "∷", "<-", "←", "->", "→", "=>", "⇒", "∀", "|", ".", "\\", "=":
+		return true
+	case:
+		return false
+	}
 }
 
 rune_to_digit :: proc(r: rune) -> i64 {
@@ -499,6 +610,8 @@ rune_is_white_space :: unicode.is_white_space
 rune_is_digit :: unicode.is_digit
 rune_is_lower :: unicode.is_lower
 rune_is_upper :: unicode.is_upper
+
+rune_is_ident_start :: proc(r: rune) -> bool {return r == '_' || rune_is_lower(r)}
 
 rune_is_not_quote :: proc(r: rune) -> bool {return r != '\"'}
 
@@ -539,7 +652,7 @@ when ODIN_TEST {
 		errors := false
 		for expected, i in tokens {
 			value := tokenizer_next(&tokenizer)
-			if value != expected {
+			if type_of(value) != type_of(expected) {
 				errors = true
 				testing.errorf(
 					t,
@@ -597,7 +710,12 @@ when ODIN_TEST {
 	parse_arrows :: proc(t: ^testing.T) {
 		expect_tokens(
 			t,
-			[]Token{TokRightArrow{}, TokLeftArrow{}, TokOperator("<="), TokRightFatArrow{}},
+			[]Token{
+				TokRightArrow{},
+				TokLeftArrow{},
+				TokOperator{[]string{}, "<="},
+				TokRightFatArrow{},
+			},
 			"-> <- <= =>",
 		)
 	}
@@ -606,7 +724,12 @@ when ODIN_TEST {
 	parse_arrow_like_operators :: proc(t: ^testing.T) {
 		expect_tokens(
 			t,
-			[]Token{TokOperator("-"), TokOperator("<"), TokEquals{}, TokPipe{}},
+			[]Token{
+				TokOperator{[]string{}, "-"},
+				TokOperator{[]string{}, "<"},
+				TokEquals{},
+				TokPipe{},
+			},
 			" - < = | ",
 		)
 	}
@@ -615,7 +738,12 @@ when ODIN_TEST {
 	parse_colons :: proc(t: ^testing.T) {
 		expect_tokens(
 			t,
-			[]Token{TokOperator(":"), TokDoubleColon{}, TokDoubleColon{}, TokOperator(":")},
+			[]Token{
+				TokOperator{[]string{}, ":"},
+				TokDoubleColon{},
+				TokDoubleColon{},
+				TokOperator{[]string{}, ":"},
+			},
 			": :: :::",
 		)
 	}
