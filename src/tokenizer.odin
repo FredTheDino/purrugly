@@ -5,23 +5,15 @@ import "core:strings"
 import "core:io"
 import "core:testing"
 import "core:unicode"
+import "core:unicode/utf8"
 
 // src/Language/PureScript/CST/Lexer.hs
 // Is this enough? Do I need big-int?
-TokInt :: struct {
-	as_int:  i64,
-	as_text: string,
-}
-TokNumber :: struct {
-	as_number: f64,
-	as_text:   string,
-}
+TokInt :: distinct i64
+TokNumber :: distinct f64
 TokRawString :: distinct string
 TokString :: distinct string
-TokChar :: struct {
-	raw:  string,
-	char: rune,
-}
+TokChar :: distinct rune
 TokHole :: distinct string
 TokUpper :: distinct string
 TokLower :: distinct string
@@ -325,7 +317,7 @@ tokenizer_char :: proc(tokenizer: ^Tokenizer, _: rune, start: i64) -> Token {
 	close := tokenizer_read_rune(tokenizer)
 	if close == '\'' {
 		end := tokenizer_start(tokenizer)
-		return TokChar{char = char, raw = tokenizer_slice_as_string(tokenizer, start, end)}
+		return TokChar(char)
 	} else {
 		return nil
 	}
@@ -355,9 +347,11 @@ tokenizer_escape :: proc(tokenizer: ^Tokenizer) -> rune {
 				if rune_is_hex_digit(r) {
 					tokenizer_read_rune(tokenizer)
 					char = char * 16 + rune(rune_to_digit(r))
+				} else {
+					break
 				}
 			}
-      return char
+			return char
 		}
 
 	}
@@ -369,6 +363,104 @@ tokenizer_int_or_number :: proc(tokenizer: ^Tokenizer, prev: rune, start: i64) -
 }
 
 tokenizer_string :: proc(tokenizer: ^Tokenizer, _: rune, start: i64) -> Token {
+	rn: [7]rune
+	tokenizer_peek_runes(tokenizer, &rn)
+	num_quotes_after_first: int
+	for r, i in rn {
+		num_quotes_after_first = i
+		if r == '"' do continue
+		else do break
+	}
+
+	switch num_quotes_after_first {
+	case 0:
+		// Normal string
+		st: [dynamic]rune
+		defer delete(st)
+		loop: for {
+			c := tokenizer_read_rune(tokenizer)
+			switch c {
+			case '\r', '\n':
+				// Error! Not supported in strings!
+				return nil
+			case '"':
+				break loop
+			case '\\':
+				before := tokenizer_start(tokenizer)
+				after := tokenizer_eat_while(tokenizer, rune_is_string_gap)
+				if after - before == 0 {
+					append(&st, tokenizer_escape(tokenizer))
+				} else {
+					d := tokenizer_read_rune(tokenizer)
+					switch d {
+					case '"':
+						break loop
+					case '\\':
+						continue loop
+					case:
+						// Error! Invalid char in gap!
+						return nil
+					}
+				}
+			case:
+				append(&st, c)
+			}
+
+		}
+
+		return TokString(utf8.runes_to_string(st[:]))
+	case 1:
+		// Normal empty string
+		return TokString("")
+	case 2, 3, 4:
+		for _ in 1 ..= 2 {
+			tokenizer_read_rune(tokenizer)
+		}
+		for {
+			tokenizer_eat_while(tokenizer, rune_is_not_quote)
+			rn: [5]rune
+			tokenizer_peek_runes(tokenizer, &rn)
+			num_quotes: int
+			for r, i in rn {
+				num_quotes = i
+				if r == '"' do continue
+				else do break
+			}
+
+			for _ in 1 ..= num_quotes {
+				tokenizer_read_rune(tokenizer)
+			}
+			switch num_quotes {
+			case 0:
+				// EoF
+				return nil
+			case 1, 2:
+				continue
+			case 3, 4, 5:
+				end := tokenizer_start(tokenizer)
+				return TokRawString(tokenizer_slice_as_string(tokenizer, start + 3, end - 3))
+			}
+		}
+
+	case 5:
+		// Raw string with quotes
+		for _ in 1 ..= 5 {
+			tokenizer_read_rune(tokenizer)
+		}
+		return TokRawString("")
+	case 6:
+		for _ in 1 ..= 5 {
+			tokenizer_read_rune(tokenizer)
+		}
+		return TokRawString("\"")
+	case 7:
+		for _ in 1 ..= 5 {
+			tokenizer_read_rune(tokenizer)
+		}
+		return TokRawString("\"\"")
+
+	}
+
 	return nil
 }
 
@@ -395,8 +487,8 @@ rune_to_digit :: proc(r: rune) -> i64 {
 	case 'A' ..= 'F':
 		return 10 + i64(r - 'A')
 	}
-  assert(false)
-  return 0
+	assert(false)
+	return 0
 }
 
 rune_is_ident :: proc(r: rune) -> bool {
@@ -407,6 +499,10 @@ rune_is_white_space :: unicode.is_white_space
 rune_is_digit :: unicode.is_digit
 rune_is_lower :: unicode.is_lower
 rune_is_upper :: unicode.is_upper
+
+rune_is_not_quote :: proc(r: rune) -> bool {return r != '\"'}
+
+rune_is_string_gap :: proc(r: rune) -> bool {return r == ' ' || r == '\r' || r == '\n'}
 
 rune_is_hex_digit :: proc(r: rune) -> bool {
 	if rune_is_digit(r) do return true
@@ -436,65 +532,6 @@ rune_is_ascii :: proc(r: rune) -> bool {
 tokenizer_slice_as_string :: proc(t: ^Tokenizer, lo, hi: i64) -> string {
 	return transmute(string)(transmute([]u8)t.reader.s)[lo:hi]
 }
-
-
-// 
-// isReservedSymbolError :: ParserErrorType -> Bool
-// isReservedSymbolError = (== ErrReservedSymbol)
-// 
-// isReservedSymbol :: Text -> Bool
-// isReservedSymbol = flip elem symbols
-//   where
-//   symbols =
-//     [ "::"
-//     , "∷"
-//     , "<-"
-//     , "←"
-//     , "->"
-//     , "→"
-//     , "=>"
-//     , "⇒"
-//     , "∀"
-//     , "|"
-//     , "."
-//     , "\\"
-//     , "="
-//     ]
-// 
-// isIdentStart :: Char -> Bool
-// isIdentStart c = Char.isLower c || c == '_'
-// 
-// isIdentChar :: Char -> Bool
-// isIdentChar c = Char.isAlphaNum c || c == '_' || c == '\''
-// 
-// isNumberChar :: Char -> Bool
-// isNumberChar c = Char.isDigit c || c == '_'
-// 
-// isNormalStringChar :: Char -> Bool
-// isNormalStringChar c = c /= '"' && c /= '\\' && c /= '\r' && c /= '\n'
-// 
-// isStringGapChar :: Char -> Bool
-// isStringGapChar c = c == ' ' || c == '\r' || c == '\n'
-// 
-// isLineFeed :: Char -> Bool
-// isLineFeed c = c == '\r' || c == '\n'
-
-
-// tokenizer_int :: proc(tokenizer: ^Tokenizer, current: i64, start: i64) -> TokInt {
-// 	current := current
-// 	loop: for {
-// 		rr, size, err := strings.reader_read_rune(tokenizer)
-// 		if err != .None do break
-// 		switch rr {
-// 		case '0' ..= '9':
-// 			current = 10 * current + rune_to_digit(rr)
-// 		case:
-// 			strings.reader_unread_rune(tokenizer)
-// 			break loop // Otherwise it breaks out of the for-loop
-// 		}
-// 	}
-// 	return TokInt{as_int = current, as_text = tokenizer_slice_as_string(tokenizer.s, start, tokenizer.i)}
-// }
 
 when ODIN_TEST {
 	expect_tokens :: proc(t: ^testing.T, tokens: []Token, str: string, loc := #caller_location) {
@@ -593,14 +630,30 @@ when ODIN_TEST {
 		expect_tokens(
 			t,
 			[]Token{
-				TokChar{char = 'a', raw = "'a'"},
-				TokChar{char = 'b', raw = "'b'"},
-				TokChar{char = 'c', raw = "'c'"},
-				TokChar{char = '#', raw = "'\\x23'"},
-				TokChar{char = '?', raw = "'\\x3f'"},
-				TokChar{char = '?', raw = "'\\x3F'"},
+				TokChar('a'),
+				TokChar('b'),
+				TokChar('c'),
+				TokChar('#'),
+				TokChar('?'),
+				TokChar('?'),
+				TokChar(0),
 			},
-			"'a' 'b' 'c' '\\x23' '\\x3f' '\\x3F'",
+			"'a' 'b' 'c' '\\x23' '\\x3f' '\\x3F' '\\x'",
+		)
+	}
+
+	@(test)
+	parse_string_simple :: proc(t: ^testing.T) {
+		expect_tokens(
+			t,
+			[]Token{
+				TokString("abc"),
+				TokString("a \"string\""),
+				TokRawString("aabbcc"),
+				TokRawString(""),
+				TokString("#$%"),
+			},
+			"\"abc\" \"a \\\"string\\\"\" \"\"\"aabbcc\"\"\" \"\"\"\"\"\" \"\\x23\\x24\\    \\\\x25\"",
 		)
 	}
 }
