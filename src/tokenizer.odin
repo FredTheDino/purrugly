@@ -1,3 +1,5 @@
+// A complete lexer for the PureScript language, heavily inspired by the one
+// from the mainline compiler.
 package purrloin
 
 import "core:fmt"
