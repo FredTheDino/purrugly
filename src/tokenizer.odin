@@ -101,6 +101,9 @@ Token :: union {
 	TokLayoutSep,
 	TokLayoutEnd,
 	TokEof,
+	//
+	TokBlockComment,
+	TokLineComment,
 }
 
 SpannedToken :: struct {
@@ -190,6 +193,8 @@ tokenizer_next :: proc(tokenizer: ^Tokenizer) -> Token {
 	ra := tokenizer_eat(tokenizer)
 
 	switch ra {
+	case 0:
+		return TokEof{}
 	// Whitespace
 	case ' ', '\n', '\r':
 		return tokenizer_next(tokenizer)
@@ -211,6 +216,8 @@ tokenizer_next :: proc(tokenizer: ^Tokenizer) -> Token {
 	case ')':
 		return TokRightParen{}
 	case '{':
+		rb := tokenizer_peek(tokenizer)
+		if rb == '-' do return tokenizer_block_comment(tokenizer)
 		return TokLeftBrace{}
 	case '}':
 		return TokRightBrace{}
@@ -231,6 +238,8 @@ tokenizer_next :: proc(tokenizer: ^Tokenizer) -> Token {
 	case '<':
 		return or_operator(tokenizer, TokLeftArrow{}, '-', ra, start)
 	case '-':
+		rb := tokenizer_peek(tokenizer)
+		if rb == '-' do return tokenizer_line_comment(tokenizer)
 		return or_operator(tokenizer, TokRightArrow{}, '>', ra, start)
 	// Needs more love
 	case '=':
@@ -305,6 +314,45 @@ or_operator :: proc(
 	defer delete(qual)
 	return tokenizer_operator(tokenizer, &qual, ra, start)
 }
+
+tokenizer_block_comment :: proc(tokenizer: ^Tokenizer) -> Token {
+	rb := tokenizer_eat(tokenizer)
+	assert(rb == '-')
+	start := tokenizer_at(tokenizer)
+	for {
+		rc := tokenizer_eat(tokenizer)
+		if rc == 0 do return nil
+		if rc != '-' do continue
+		rd := tokenizer_eat(tokenizer)
+		if rd != '}' do continue
+		end := tokenizer_at(tokenizer)
+		return TokBlockComment(tokenizer_slice(tokenizer, start, end - 2))
+	}
+}
+
+tokenizer_line_comment :: proc(tokenizer: ^Tokenizer) -> Token {
+	rb := tokenizer_eat(tokenizer)
+	assert(rb == '-')
+	start := tokenizer_at(tokenizer)
+	end := start
+	for {
+		rc := tokenizer_eat(tokenizer)
+		if rc == 0 do return nil
+		if rc == '\r' {
+			rd := tokenizer_eat(tokenizer)
+			if rd == '\n' {
+				end = tokenizer_at(tokenizer) - 2
+				break
+			} else do continue
+		}
+		if rc == '\n' {
+			end = tokenizer_at(tokenizer) - 1
+			break
+		}
+	}
+	return TokLineComment(tokenizer_slice(tokenizer, start, end))
+}
+
 
 tokenizer_left_paren :: proc(tokenizer: ^Tokenizer) -> Token {
 	reset := tokenizer^
@@ -761,8 +809,8 @@ when ODIN_TEST {
 			}
 		}
 		last := tokenizer_next(&tokenizer)
-		if last != nil {
-			testing.errorf(t, "Got more tokens after the last one: %v", last, loc = loc)
+		if type_of(last) == TokEof {
+			testing.errorf(t, "Expected to find EoF after tokens: %v", last, loc = loc)
 		}
 
 		if errors {
@@ -908,6 +956,19 @@ when ODIN_TEST {
 				TokNumber(2000),
 			},
 			"0.1 0._1 1.___2__ 1e-4 2e3",
+		)
+	}
+
+	@(test)
+	parse_comment :: proc(t: ^testing.T) {
+		expect_tokens(
+			t,
+			[]Token{
+				TokBlockComment("I am a crocodile"),
+				TokLineComment("Something else"),
+				TokLineComment("Another comment"),
+			},
+			"{-I am a crocodile-} --Something else\n--Another comment\r\n",
 		)
 	}
 }
