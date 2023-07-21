@@ -1,4 +1,4 @@
-package purrloin
+package purrugly
 
 import "core:testing"
 import "core:fmt"
